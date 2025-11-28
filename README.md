@@ -1,1 +1,1 @@
-# 4010_Project
+# write more in depth about modal and the structure of it, how everything will be stored in the modal volume
