@@ -1,6 +1,6 @@
 README — Weather Forecasting With Deep Learning
 
-This project focuses on building a 7-day (168-hour) weather forecasting system using several deep learning architectures. All experiments were run on Modal, which provided GPU acceleration and persistent storage through Modal volumes. The overall workflow included data preprocessing, model training, model evaluation, hyperparameter tuning, and final result visualization.
+This project focuses on building a 7-day (168-hours) weather forecasting system using several deep learning architectures. All experiments were run on Modal, which provided GPU acceleration and persistent storage through Modal volumes. The overall workflow included data preprocessing, model training, model evaluation, hyperparameter tuning, and final result visualization.
 
 The process began with a dedicated preprocessing script that transformed the raw weather dataset into a machine-learning-ready format. Each sample was constructed using a 10-day input window with hourly readings, giving models 240 timesteps of historical information. The goal was to predict the following 168 hours (seven days). The dataset contained a wide range of meteorological and temporal features—temperature, relative humidity, wind speed, wind direction, soil measurements, and cyclical timestamp encodings—while the prediction targets consisted of the six primary weather variables. All processed data (X.npy and Y.npy) was stored inside a Modal volume so that every model could access the same standardized dataset.
 
