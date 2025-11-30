@@ -71,6 +71,55 @@ def compare_models():
     lstm.eval()
 
     # -------------------------
+    # TCNN MODEL
+    # -------------------------
+    class TemporalConvBlock(nn.Module):
+        def __init__(self, in_channels, out_channels, kernel_size=3, dilation=1, dropout=0.1):
+            super().__init__()
+            padding = (kernel_size - 1) * dilation
+            self.pad1 = nn.ConstantPad1d((padding, 0), 0)
+            self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
+            self.relu1 = nn.ReLU()
+            self.dropout1 = nn.Dropout(dropout)
+            self.pad2 = nn.ConstantPad1d((padding, 0), 0)
+            self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size, dilation=dilation)
+            self.relu2 = nn.ReLU()
+            self.dropout2 = nn.Dropout(dropout)
+            self.residual = nn.Conv1d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else None
+        def forward(self, x):
+            out = self.pad1(x)
+            out = self.conv1(out)
+            out = self.relu1(out)
+            out = self.dropout1(out)
+            out = self.pad2(out)
+            out = self.conv2(out)
+            out = self.relu2(out)
+            out = self.dropout2(out)
+            res = x if self.residual is None else self.residual(x)
+            return out + res
+
+    class TCNN(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Match the saved model architecture: [16, 128, 128, 128, ...] with 7 layers
+            channels = [input_dim, 128, 128, 128, 128, 128, 128, 128]
+            layers = []
+            for i in range(len(channels) - 1):
+                layers.append(TemporalConvBlock(channels[i], channels[i + 1], kernel_size=3, dilation=2 ** i, dropout=0.1))
+            self.tcn = nn.Sequential(*layers)
+            self.head = nn.Linear(channels[-1], pred_len * output_dim)
+        def forward(self, x):
+            x = x.transpose(1, 2)
+            features = self.tcn(x)
+            last_step = features[:, :, -1]
+            out = self.head(last_step)
+            return out.view(-1, pred_len, output_dim)
+
+    tcnn = TCNN().cuda()
+    tcnn.load_state_dict(torch.load("/data/tcnn_weather_model.pth"))
+    tcnn.eval()
+
+    # -------------------------
     # FEDFORMER (Proper Implementation)
     # -------------------------
     class PositionalEncoding(nn.Module):
@@ -187,60 +236,329 @@ def compare_models():
     fed.eval()
 
     # -------------------------
-    # EVALUATE BOTH MODELS
+    # EVALUATE ALL THREE MODELS
     # -------------------------
     bs = 512
     lstm_preds = []
     fed_preds = []
+    tcnn_preds = []
 
     with torch.no_grad():
         for i in range(0, len(X_t), bs):
             lstm_preds.append(lstm(X_t[i:i+bs]).cpu().numpy())
             fed_preds.append(fed(X_t[i:i+bs]).cpu().numpy())
+            tcnn_preds.append(tcnn(X_t[i:i+bs]).cpu().numpy())
 
     lstm_preds = np.concatenate(lstm_preds, axis=0)
     fed_preds  = np.concatenate(fed_preds,  axis=0)
+    tcnn_preds = np.concatenate(tcnn_preds, axis=0)
 
-    true_last = Y[:, -1]
-    lstm_last = lstm_preds[:, -1]
-    fed_last  = fed_preds[:, -1]
+    true_last = Y[:, -1, :]
+    lstm_last = lstm_preds[:, -1, :]
+    fed_last  = fed_preds[:, -1, :]
+    tcnn_last = tcnn_preds[:, -1, :]
 
-    print("\n" + "=" * 60)
-    print("MODEL COMPARISON: LSTM vs FEDformer")
-    print("=" * 60)
-    print(f"{'Metric':<12} {'LSTM':<15} {'FEDformer':<15} {'Winner':<10}")
-    print("-" * 60)
+    print("\n" + "=" * 80)
+    print("MODEL COMPARISON: LSTM vs FEDformer vs TCNN")
+    print("=" * 80)
+    print(f"{'Metric':<12} {'LSTM':<15} {'FEDformer':<15} {'TCNN':<15} {'Winner':<10}")
+    print("-" * 80)
+    
+    lstm_mae = mean_absolute_error(true_last, lstm_last)
+    fed_mae = mean_absolute_error(true_last, fed_last)
+    tcnn_mae = mean_absolute_error(true_last, tcnn_last)
+    
+    lstm_mse = mean_squared_error(true_last, lstm_last)
+    fed_mse = mean_squared_error(true_last, fed_last)
+    tcnn_mse = mean_squared_error(true_last, tcnn_last)
+    
+    lstm_rmse = np.sqrt(lstm_mse)
+    fed_rmse = np.sqrt(fed_mse)
+    tcnn_rmse = np.sqrt(tcnn_mse)
+    
+    lstm_r2 = r2_score(true_last, lstm_last)
+    fed_r2 = r2_score(true_last, fed_last)
+    tcnn_r2 = r2_score(true_last, tcnn_last)
     
     metrics = [
-        ("MAE", mean_absolute_error(true_last, lstm_last), mean_absolute_error(true_last, fed_last), "lower"),
-        ("MSE", mean_squared_error(true_last, lstm_last), mean_squared_error(true_last, fed_last), "lower"),
-        ("RMSE", np.sqrt(mean_squared_error(true_last, lstm_last)), np.sqrt(mean_squared_error(true_last, fed_last)), "lower"),
-        ("R²", r2_score(true_last, lstm_last), r2_score(true_last, fed_last), "higher"),
+        ("MAE", lstm_mae, fed_mae, tcnn_mae, "lower"),
+        ("MSE", lstm_mse, fed_mse, tcnn_mse, "lower"),
+        ("RMSE", lstm_rmse, fed_rmse, tcnn_rmse, "lower"),
+        ("R²", lstm_r2, fed_r2, tcnn_r2, "higher"),
     ]
     
-    for name, lstm_val, fed_val, better in metrics:
+    for name, lstm_val, fed_val, tcnn_val, better in metrics:
         if better == "lower":
-            winner = "FEDformer" if fed_val < lstm_val else "LSTM"
-            lstm_str = f"{lstm_val:.6f}"
-            fed_str = f"{fed_val:.6f}"
+            vals = [lstm_val, fed_val, tcnn_val]
+            winner_idx = np.argmin(vals)
+            winner = ["LSTM", "FEDformer", "TCNN"][winner_idx]
         else:
-            winner = "FEDformer" if fed_val > lstm_val else "LSTM"
-            lstm_str = f"{lstm_val:.6f}"
-            fed_str = f"{fed_val:.6f}"
+            vals = [lstm_val, fed_val, tcnn_val]
+            winner_idx = np.argmax(vals)
+            winner = ["LSTM", "FEDformer", "TCNN"][winner_idx]
         
-        print(f"{name:<12} {lstm_str:<15} {fed_str:<15} {winner:<10}")
+        print(f"{name:<12} {lstm_val:.6f}  {fed_val:.6f}  {tcnn_val:.6f}  {winner:<10}")
 
-    # Calculate improvement percentages
-    mae_improvement = ((mean_absolute_error(true_last, lstm_last) - mean_absolute_error(true_last, fed_last)) / mean_absolute_error(true_last, lstm_last)) * 100
-    rmse_improvement = ((np.sqrt(mean_squared_error(true_last, lstm_last)) - np.sqrt(mean_squared_error(true_last, fed_last))) / np.sqrt(mean_squared_error(true_last, lstm_last))) * 100
-    r2_improvement = ((r2_score(true_last, fed_last) - r2_score(true_last, lstm_last)) / abs(r2_score(true_last, lstm_last))) * 100 if r2_score(true_last, lstm_last) != 0 else 0
+    # Calculate improvement percentages (relative to LSTM baseline)
+    fed_mae_improvement = ((lstm_mae - fed_mae) / lstm_mae) * 100
+    tcnn_mae_improvement = ((lstm_mae - tcnn_mae) / lstm_mae) * 100
+    
+    fed_rmse_improvement = ((lstm_rmse - fed_rmse) / lstm_rmse) * 100
+    tcnn_rmse_improvement = ((lstm_rmse - tcnn_rmse) / lstm_rmse) * 100
+    
+    fed_r2_improvement = ((fed_r2 - lstm_r2) / abs(lstm_r2)) * 100 if lstm_r2 != 0 else 0
+    tcnn_r2_improvement = ((tcnn_r2 - lstm_r2) / abs(lstm_r2)) * 100 if lstm_r2 != 0 else 0
 
-    print("\n" + "=" * 60)
-    print("IMPROVEMENT ANALYSIS")
-    print("=" * 60)
-    print(f"MAE Improvement:  {mae_improvement:+.2f}% ({'FEDformer better' if mae_improvement > 0 else 'LSTM better'})")
-    print(f"RMSE Improvement: {rmse_improvement:+.2f}% ({'FEDformer better' if rmse_improvement > 0 else 'LSTM better'})")
-    print(f"R² Improvement:   {r2_improvement:+.2f}% ({'FEDformer better' if r2_improvement > 0 else 'LSTM better'})")
+    print("\n" + "=" * 80)
+    print("IMPROVEMENT ANALYSIS (vs LSTM baseline)")
+    print("=" * 80)
+    print(f"MAE Improvement:")
+    print(f"  FEDformer: {fed_mae_improvement:+.2f}% ({'better' if fed_mae_improvement > 0 else 'worse'})")
+    print(f"  TCNN:      {tcnn_mae_improvement:+.2f}% ({'better' if tcnn_mae_improvement > 0 else 'worse'})")
+    print(f"RMSE Improvement:")
+    print(f"  FEDformer: {fed_rmse_improvement:+.2f}% ({'better' if fed_rmse_improvement > 0 else 'worse'})")
+    print(f"  TCNN:      {tcnn_rmse_improvement:+.2f}% ({'better' if tcnn_rmse_improvement > 0 else 'worse'})")
+    print(f"R² Improvement:")
+    print(f"  FEDformer: {fed_r2_improvement:+.2f}% ({'better' if fed_r2_improvement > 0 else 'worse'})")
+    print(f"  TCNN:      {tcnn_r2_improvement:+.2f}% ({'better' if tcnn_r2_improvement > 0 else 'worse'})")
+
+    # --------------------------------------------
+    # CREATE COMPARISON VISUALIZATION
+    # --------------------------------------------
+    import matplotlib.pyplot as plt
+    
+    plot_dir = "/data/comparison_plots"
+    os.makedirs(plot_dir, exist_ok=True)
+    
+    # Calculate additional metrics for plots
+    lstm_errors = lstm_last - true_last
+    fed_errors = fed_last - true_last
+    tcnn_errors = tcnn_last - true_last
+    
+    lstm_r2_features = [r2_score(true_last[:, f], lstm_last[:, f]) for f in range(output_dim)]
+    fed_r2_features = [r2_score(true_last[:, f], fed_last[:, f]) for f in range(output_dim)]
+    tcnn_r2_features = [r2_score(true_last[:, f], tcnn_last[:, f]) for f in range(output_dim)]
+    
+    lstm_mae_features = [mean_absolute_error(true_last[:, f], lstm_last[:, f]) for f in range(output_dim)]
+    fed_mae_features = [mean_absolute_error(true_last[:, f], fed_last[:, f]) for f in range(output_dim)]
+    tcnn_mae_features = [mean_absolute_error(true_last[:, f], tcnn_last[:, f]) for f in range(output_dim)]
+    
+    # Calculate MAE over horizon for all models
+    lstm_horizon_mae = []
+    fed_horizon_mae = []
+    tcnn_horizon_mae = []
+    for t in range(pred_len):
+        lstm_horizon_mae.append(mean_absolute_error(Y[:, t, :], lstm_preds[:, t, :]))
+        fed_horizon_mae.append(mean_absolute_error(Y[:, t, :], fed_preds[:, t, :]))
+        tcnn_horizon_mae.append(mean_absolute_error(Y[:, t, :], tcnn_preds[:, t, :]))
+    
+    # Feature names matching the target columns
+    feature_names = ['Temperature', 'Relative Humidity', 'Wind Speed', 
+                     'Wind Direction', 'Soil Temperature', 'Soil Moisture']
+    features = feature_names[:output_dim]  # Ensure we have the right number
+    
+    hours = np.arange(1, pred_len + 1)
+    sample_idx = len(lstm_preds) // 2
+    
+    # Create comprehensive comparison figure - larger to accommodate 6 feature plots
+    fig = plt.figure(figsize=(28, 20))
+    gs = fig.add_gridspec(5, 3, hspace=0.4, wspace=0.3)
+    
+    # 1-6. Forecast over time for each feature (6 separate plots in 2 rows)
+    feature_axes = []
+    for f in range(output_dim):
+        row = f // 3
+        col = f % 3
+        ax = fig.add_subplot(gs[row, col])
+        ax.plot(hours, Y[sample_idx, :, f], label='True', linewidth=2.5, alpha=0.8, color='black')
+        ax.plot(hours, lstm_preds[sample_idx, :, f], label='LSTM', linewidth=2, linestyle='--', alpha=0.7, color='#1f77b4')
+        ax.plot(hours, fed_preds[sample_idx, :, f], label='FEDformer', linewidth=2, linestyle=':', alpha=0.7, color='#ff7f0e')
+        ax.plot(hours, tcnn_preds[sample_idx, :, f], label='TCNN', linewidth=2, linestyle='-.', alpha=0.7, color='#2ca02c')
+        ax.set_xlabel('Forecast Hour', fontsize=10)
+        ax.set_ylabel('Value', fontsize=10)
+        ax.set_title(f'{feature_names[f]} - Forecast Over 168 Hours', fontsize=11, fontweight='bold')
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
+        feature_axes.append(ax)
+    
+    # 7-9. Scatter plots for all 3 models (row 2)
+    colors = plt.cm.tab10(np.linspace(0, 1, output_dim))
+    
+    ax2 = fig.add_subplot(gs[2, 0])
+    for f in range(output_dim):
+        ax2.scatter(true_last[:, f], lstm_last[:, f], s=1, alpha=0.3, c=[colors[f]], label=feature_names[f])
+    min_val = min(true_last.min(), lstm_last.min())
+    max_val = max(true_last.max(), lstm_last.max())
+    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    ax2.set_xlabel('True Values', fontsize=10)
+    ax2.set_ylabel('Predicted Values', fontsize=10)
+    ax2.set_title('LSTM: Predicted vs True', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=7, ncol=2, loc='upper left')
+    ax2.grid(True, alpha=0.3)
+    
+    ax3 = fig.add_subplot(gs[2, 1])
+    for f in range(output_dim):
+        ax3.scatter(true_last[:, f], fed_last[:, f], s=1, alpha=0.3, c=[colors[f]], label=feature_names[f])
+    min_val = min(true_last.min(), fed_last.min())
+    max_val = max(true_last.max(), fed_last.max())
+    ax3.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    ax3.set_xlabel('True Values', fontsize=10)
+    ax3.set_ylabel('Predicted Values', fontsize=10)
+    ax3.set_title('FEDformer: Predicted vs True', fontsize=12, fontweight='bold')
+    ax3.legend(fontsize=7, ncol=2, loc='upper left')
+    ax3.grid(True, alpha=0.3)
+    
+    ax3_tcnn = fig.add_subplot(gs[2, 2])
+    for f in range(output_dim):
+        ax3_tcnn.scatter(true_last[:, f], tcnn_last[:, f], s=1, alpha=0.3, c=[colors[f]], label=feature_names[f])
+    min_val = min(true_last.min(), tcnn_last.min())
+    max_val = max(true_last.max(), tcnn_last.max())
+    ax3_tcnn.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    ax3_tcnn.set_xlabel('True Values', fontsize=10)
+    ax3_tcnn.set_ylabel('Predicted Values', fontsize=10)
+    ax3_tcnn.set_title('TCNN: Predicted vs True', fontsize=12, fontweight='bold')
+    ax3_tcnn.legend(fontsize=7, ncol=2, loc='upper left')
+    ax3_tcnn.grid(True, alpha=0.3)
+    
+    # 10. Error histograms comparison - All 3 models (row 3)
+    ax4 = fig.add_subplot(gs[3, 0])
+    ax4.hist(lstm_errors.flatten(), bins=50, alpha=0.5, label='LSTM', edgecolor='black', color='#1f77b4')
+    ax4.hist(fed_errors.flatten(), bins=50, alpha=0.5, label='FEDformer', edgecolor='black', color='#ff7f0e')
+    ax4.hist(tcnn_errors.flatten(), bins=50, alpha=0.5, label='TCNN', edgecolor='black', color='#2ca02c')
+    ax4.axvline(0, color='r', linestyle='--', linewidth=2)
+    ax4.set_xlabel('Error', fontsize=10)
+    ax4.set_ylabel('Frequency', fontsize=10)
+    ax4.set_title('Error Distribution Comparison', fontsize=12, fontweight='bold')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    
+    # 11. R² per feature comparison - All 3 models (row 3)
+    ax5 = fig.add_subplot(gs[3, 1])
+    x = np.arange(len(features))
+    width = 0.25
+    ax5.bar(x - width, lstm_r2_features, width, label='LSTM', color='#1f77b4', edgecolor='black')
+    ax5.bar(x, fed_r2_features, width, label='FEDformer', color='#ff7f0e', edgecolor='black')
+    ax5.bar(x + width, tcnn_r2_features, width, label='TCNN', color='#2ca02c', edgecolor='black')
+    ax5.set_ylabel('R² Score', fontsize=10)
+    ax5.set_title('R² Per Feature Comparison', fontsize=12, fontweight='bold')
+    ax5.set_xticks(x)
+    ax5.set_xticklabels(features, rotation=45, ha='right')
+    ax5.legend()
+    ax5.set_ylim([0, 1])
+    ax5.grid(True, alpha=0.3, axis='y')
+    
+    # 12. MAE per feature comparison - All 3 models (row 3)
+    ax6 = fig.add_subplot(gs[3, 2])
+    ax6.bar(x - width, lstm_mae_features, width, label='LSTM', color='#1f77b4', edgecolor='black')
+    ax6.bar(x, fed_mae_features, width, label='FEDformer', color='#ff7f0e', edgecolor='black')
+    ax6.bar(x + width, tcnn_mae_features, width, label='TCNN', color='#2ca02c', edgecolor='black')
+    ax6.set_ylabel('MAE', fontsize=10)
+    ax6.set_title('MAE Per Feature Comparison', fontsize=12, fontweight='bold')
+    ax6.set_xticks(x)
+    ax6.set_xticklabels(features, rotation=45, ha='right')
+    ax6.legend()
+    ax6.grid(True, alpha=0.3, axis='y')
+    
+    # 13. MAE over forecast horizon comparison - All 3 models (row 4)
+    ax7 = fig.add_subplot(gs[4, 0])
+    ax7.plot(lstm_horizon_mae, label='LSTM', linewidth=2, color='#1f77b4')
+    ax7.plot(fed_horizon_mae, label='FEDformer', linewidth=2, color='#ff7f0e')
+    ax7.plot(tcnn_horizon_mae, label='TCNN', linewidth=2, color='#2ca02c')
+    ax7.set_xlabel('Forecast Step (Hours)', fontsize=10)
+    ax7.set_ylabel('MAE', fontsize=10)
+    ax7.set_title('MAE over Forecast Horizon', fontsize=12, fontweight='bold')
+    ax7.legend()
+    ax7.grid(True, alpha=0.3)
+    
+    # 14. Metrics comparison table - All 3 models (row 4)
+    ax8 = fig.add_subplot(gs[4, 1])
+    ax8.axis('off')
+    
+    # Determine winners for each metric
+    mae_winner = ['LSTM', 'FEDformer', 'TCNN'][np.argmin([lstm_mae, fed_mae, tcnn_mae])]
+    rmse_winner = ['LSTM', 'FEDformer', 'TCNN'][np.argmin([lstm_rmse, fed_rmse, tcnn_rmse])]
+    r2_winner = ['LSTM', 'FEDformer', 'TCNN'][np.argmax([lstm_r2, fed_r2, tcnn_r2])]
+    
+    metrics_text = f"""
+    METRICS COMPARISON
+    
+    MAE:
+      LSTM:      {lstm_mae:.6f}
+      FEDformer: {fed_mae:.6f}
+      TCNN:      {tcnn_mae:.6f}
+      Winner:    {mae_winner}
+    
+    RMSE:
+      LSTM:      {lstm_rmse:.6f}
+      FEDformer: {fed_rmse:.6f}
+      TCNN:      {tcnn_rmse:.6f}
+      Winner:    {rmse_winner}
+    
+    R²:
+      LSTM:      {lstm_r2:.6f}
+      FEDformer: {fed_r2:.6f}
+      TCNN:      {tcnn_r2:.6f}
+      Winner:    {r2_winner}
+    """
+    ax8.text(0.05, 0.5, metrics_text, fontsize=9, family='monospace',
+             verticalalignment='center', bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+    
+    # 15. Improvement percentages and winner (row 4, column 2)
+    ax9 = fig.add_subplot(gs[4, 2])
+    ax9.axis('off')
+    
+    # Count wins
+    lstm_wins = sum([lstm_mae == min([lstm_mae, fed_mae, tcnn_mae]),
+                     lstm_rmse == min([lstm_rmse, fed_rmse, tcnn_rmse]),
+                     lstm_r2 == max([lstm_r2, fed_r2, tcnn_r2])])
+    fed_wins = sum([fed_mae == min([lstm_mae, fed_mae, tcnn_mae]),
+                    fed_rmse == min([lstm_rmse, fed_rmse, tcnn_rmse]),
+                    fed_r2 == max([lstm_r2, fed_r2, tcnn_r2])])
+    tcnn_wins = sum([tcnn_mae == min([lstm_mae, fed_mae, tcnn_mae]),
+                     tcnn_rmse == min([lstm_rmse, fed_rmse, tcnn_rmse]),
+                     tcnn_r2 == max([lstm_r2, fed_r2, tcnn_r2])])
+    
+    wins = [lstm_wins, fed_wins, tcnn_wins]
+    winner_idx = np.argmax(wins)
+    winner_name = ['LSTM', 'FEDformer', 'TCNN'][winner_idx]
+    winner_color = ['lightcoral', 'lightgreen', 'lightyellow'][winner_idx]
+    
+    combined_text = f"""
+    IMPROVEMENT vs LSTM
+    
+    MAE:
+      FEDformer: {fed_mae_improvement:+.2f}%
+      TCNN:      {tcnn_mae_improvement:+.2f}%
+    
+    RMSE:
+      FEDformer: {fed_rmse_improvement:+.2f}%
+      TCNN:      {tcnn_rmse_improvement:+.2f}%
+    
+    R²:
+      FEDformer: {fed_r2_improvement:+.2f}%
+      TCNN:      {tcnn_r2_improvement:+.2f}%
+    
+    {'='*22}
+    OVERALL WINNER
+    
+    LSTM:      {lstm_wins}/3
+    FEDformer: {fed_wins}/3
+    TCNN:      {tcnn_wins}/3
+    
+    WINNER: {winner_name}
+    {'='*22}
+    """
+    ax9.text(0.05, 0.5, combined_text, fontsize=9, family='monospace', fontweight='bold',
+             verticalalignment='center', bbox=dict(boxstyle='round', facecolor=winner_color, alpha=0.7))
+    
+    # Add overall title
+    fig.suptitle('LSTM vs FEDformer vs TCNN: Complete Model Comparison', fontsize=16, fontweight='bold', y=0.995)
+    
+    # Save combined comparison plot
+    plt.savefig(f"{plot_dir}/model_comparison_complete.png", dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    print(f"\nSaved comparison plot: {plot_dir}/model_comparison_complete.png")
 
 @app.local_entrypoint()
 def main():

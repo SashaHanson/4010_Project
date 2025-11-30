@@ -23,6 +23,13 @@ def test_transformer():
     from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
     import os
     import math
+    import matplotlib.pyplot as plt
+
+    print("Files available in /data:", os.listdir("/data"))
+
+    # Make plot directory for FEDformer
+    plot_dir = "/data/plots_fedformer"
+    os.makedirs(plot_dir, exist_ok=True)
 
     X = np.load("/data/X.npy")
     Y = np.load("/data/Y.npy")
@@ -161,14 +168,151 @@ def test_transformer():
 
     preds = np.concatenate(preds, axis=0)
 
-    true_last = Y[:, -1]
-    pred_last = preds[:, -1]
+    true_last = Y[:, -1, :]
+    pred_last = preds[:, -1, :]
+
+    mae = mean_absolute_error(true_last, pred_last)
+    mse = mean_squared_error(true_last, pred_last)
+    rmse = np.sqrt(mse)
+    r2 = r2_score(true_last, pred_last)
 
     print("\n===== FEDFORMER MODEL PERFORMANCE =====")
-    print("MAE :", mean_absolute_error(true_last, pred_last))
-    print("MSE :", mean_squared_error(true_last, pred_last))
-    print("RMSE:", np.sqrt(mean_squared_error(true_last, pred_last)))
-    print("R2  :", r2_score(true_last, pred_last))
+    print("MAE :", mae)
+    print("MSE :", mse)
+    print("RMSE:", rmse)
+    print("R2  :", r2)
+
+    # --------------------------------------------
+    # CREATE COMBINED PLOT - ALL GRAPHS IN ONE PNG
+    # --------------------------------------------
+
+    features = [f"Feature {i}" for i in range(output_dim)]
+    errors = pred_last - true_last
+    
+    # Calculate R² per feature
+    r2_features = []
+    for f in range(output_dim):
+        r2_f = r2_score(true_last[:, f], pred_last[:, f])
+        r2_features.append(r2_f)
+    
+    # Calculate MAE across forecast horizon
+    horizon_mae = []
+    for t in range(pred_len):
+        horizon_mae.append(mean_absolute_error(Y[:, t, :], preds[:, t, :]))
+
+    # Create a large figure with subplots
+    fig = plt.figure(figsize=(20, 12))
+    gs = fig.add_gridspec(3, 3, hspace=0.3, wspace=0.3)
+
+    # 1. Forecast over time (168 hours) - Sample prediction vs actual
+    ax1 = fig.add_subplot(gs[0, :])
+    # Select a random sample to visualize
+    sample_idx = len(preds) // 2  # Use middle sample
+    hours = np.arange(1, pred_len + 1)
+    
+    # Plot first 3 features for visibility
+    for f in range(min(3, output_dim)):
+        ax1.plot(hours, Y[sample_idx, :, f], label=f'True Feature {f}', linewidth=2, alpha=0.7)
+        ax1.plot(hours, preds[sample_idx, :, f], label=f'Predicted Feature {f}', linewidth=2, linestyle='--', alpha=0.7)
+    ax1.set_xlabel('Forecast Hour', fontsize=12)
+    ax1.set_ylabel('Value', fontsize=12)
+    ax1.set_title(f'FEDformer: Forecast Over 168 Hours (Sample {sample_idx})', fontsize=14, fontweight='bold')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Scatter plot - Predicted vs True (last timestep) - Combined for all features
+    ax2 = fig.add_subplot(gs[1, 0])
+    colors = plt.cm.tab10(np.linspace(0, 1, output_dim))
+    for f in range(output_dim):
+        ax2.scatter(true_last[:, f], pred_last[:, f], s=1, alpha=0.3, label=f'F{f}', c=[colors[f]])
+    # Add diagonal line
+    min_val = min(true_last.min(), pred_last.min())
+    max_val = max(true_last.max(), pred_last.max())
+    ax2.plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    ax2.set_xlabel('True Values', fontsize=10)
+    ax2.set_ylabel('Predicted Values', fontsize=10)
+    ax2.set_title('Predicted vs True (Last Step)', fontsize=12, fontweight='bold')
+    ax2.legend(fontsize=8, ncol=2)
+    ax2.grid(True, alpha=0.3)
+
+    # 3. Error histogram
+    ax3 = fig.add_subplot(gs[1, 1])
+    ax3.hist(errors.flatten(), bins=50, edgecolor='black', alpha=0.7)
+    ax3.axvline(0, color='r', linestyle='--', linewidth=2, label='Zero Error')
+    ax3.set_xlabel('Error', fontsize=10)
+    ax3.set_ylabel('Frequency', fontsize=10)
+    ax3.set_title('Error Distribution (Last Step)', fontsize=12, fontweight='bold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+
+    # 4. R² per feature
+    ax4 = fig.add_subplot(gs[1, 2])
+    bars = ax4.bar(features, r2_features, color=colors[:output_dim], edgecolor='black')
+    ax4.set_ylabel('R² Score', fontsize=10)
+    ax4.set_title('R² Per Feature (Last Step)', fontsize=12, fontweight='bold')
+    ax4.set_ylim([0, 1])
+    ax4.tick_params(axis='x', rotation=45)
+    # Add value labels on bars
+    for bar, val in zip(bars, r2_features):
+        height = bar.get_height()
+        ax4.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+    ax4.grid(True, alpha=0.3, axis='y')
+
+    # 5. MAE across forecast horizon
+    ax5 = fig.add_subplot(gs[2, 0])
+    ax5.plot(horizon_mae, linewidth=2, color='darkblue')
+    ax5.set_xlabel('Forecast Step (Hours)', fontsize=10)
+    ax5.set_ylabel('MAE', fontsize=10)
+    ax5.set_title('MAE over Forecast Horizon (1 → 168 hours)', fontsize=12, fontweight='bold')
+    ax5.grid(True, alpha=0.3)
+
+    # 6. Metrics summary text
+    ax6 = fig.add_subplot(gs[2, 1])
+    ax6.axis('off')
+    metrics_text = f"""
+    FEDFORMER MODEL PERFORMANCE SUMMARY
+    
+    Overall Metrics (Last Timestep):
+    • MAE:  {mae:.6f}
+    • MSE:  {mse:.6f}
+    • RMSE: {rmse:.6f}
+    • R²:   {r2:.6f}
+    
+    Best Feature R²: {max(r2_features):.4f} (Feature {np.argmax(r2_features)})
+    Worst Feature R²: {min(r2_features):.4f} (Feature {np.argmin(r2_features)})
+    
+    Forecast Horizon:
+    • Initial MAE (Hour 1): {horizon_mae[0]:.6f}
+    • Final MAE (Hour 168): {horizon_mae[-1]:.6f}
+    • Avg MAE: {np.mean(horizon_mae):.6f}
+    """
+    ax6.text(0.1, 0.5, metrics_text, fontsize=11, family='monospace',
+             verticalalignment='center', bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+    # 7. Feature-wise MAE comparison
+    ax7 = fig.add_subplot(gs[2, 2])
+    feature_mae = [mean_absolute_error(true_last[:, f], pred_last[:, f]) for f in range(output_dim)]
+    bars = ax7.bar(features, feature_mae, color=colors[:output_dim], edgecolor='black')
+    ax7.set_ylabel('MAE', fontsize=10)
+    ax7.set_title('MAE Per Feature (Last Step)', fontsize=12, fontweight='bold')
+    ax7.tick_params(axis='x', rotation=45)
+    # Add value labels
+    for bar, val in zip(bars, feature_mae):
+        height = bar.get_height()
+        ax7.text(bar.get_x() + bar.get_width()/2., height,
+                f'{val:.3f}', ha='center', va='bottom', fontsize=8)
+    ax7.grid(True, alpha=0.3, axis='y')
+
+    # Add overall title
+    fig.suptitle('FEDformer Model Evaluation - Complete Analysis', fontsize=16, fontweight='bold', y=0.995)
+
+    # Save combined plot
+    plt.savefig(f"{plot_dir}/fedformer_complete_analysis.png", dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print("\nSaved combined plot file:", f"{plot_dir}/fedformer_complete_analysis.png")
+    print("FEDformer evaluation and graphing completed.")
 
 @app.local_entrypoint()
 def main():
