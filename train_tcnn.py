@@ -58,6 +58,7 @@ def train_tcnn():
     dataset = torch.utils.data.TensorDataset(X, Y)
     loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
 
+    #change for sasha
     # Capture dimensions directly from the data to keep the model flexible.
     input_dim = X.shape[2]      # number of features per timestep (16)
     output_dim = Y.shape[2]     # number of targets per timestep (6)
