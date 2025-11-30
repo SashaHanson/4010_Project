@@ -9,7 +9,7 @@ app = modal.App("tcnn-training")
 # (Modal will place the container on GPU hardware when scheduled.)
 image = (
     modal.Image.debian_slim()
-    .pip_install("torch", "numpy")
+    .pip_install("torch", "numpy", "tqdm")
 )
 
 # Reuse the dataset volume that already holds X.npy and Y.npy
@@ -31,6 +31,7 @@ def train_tcnn():
     import torch
     import torch.nn as nn
     import numpy as np
+    from tqdm import tqdm
     import os
 
     # Prefer GPU (A100) when available; CPU is only a fallback for local runs.
@@ -145,13 +146,25 @@ def train_tcnn():
     # ---------------------------
     # Training loop
     # ---------------------------
-    EPOCHS = 5  # Keep short for quick checks; increase once pipeline is validated.
+    EPOCHS = 2  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
+    save_path = "/data/tcnn_weather_model.pth"  # overwritten each epoch; latest weights for eval
+    checkpoint_path = "/data/tcnn_resume.pth"    # holds model + optimizer for resume
 
-    for epoch in range(EPOCHS):
+    # If a checkpoint exists, resume from it.
+    start_epoch = 0
+    if os.path.exists(checkpoint_path):
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        start_epoch = ckpt.get("epoch", 0)
+        print(f"Resuming from epoch {start_epoch}")
+
+    for epoch in range(start_epoch, EPOCHS):
         model.train()
         total_loss = 0.0
 
-        for bx, by in loader:
+        # tqdm renders a live bar over batches for this epoch.
+        for bx, by in tqdm(loader, desc=f"Epoch {epoch + 1}/{EPOCHS}", leave=False):
             optimizer.zero_grad()
             preds = model(bx)           # forward pass (predict entire 168-step horizon)
             loss = criterion(preds, by) # compare full 168-step sequences
@@ -161,11 +174,21 @@ def train_tcnn():
 
         print(f"Epoch {epoch + 1}/{EPOCHS}  Loss: {total_loss:.4f}")
 
+        # Persist a resume checkpoint and the latest weights each epoch.
+        torch.save(
+            {
+                "epoch": epoch + 1,  # next epoch to run
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            },
+            checkpoint_path,
+        )
+        torch.save(model.state_dict(), save_path)
+        print("Saved checkpoint:", checkpoint_path)
+        print("Saved weights:", save_path)
+
     # ---------------------------
     # Save model to the volume
     # ---------------------------
-    save_path = "/data/tcnn_weather_model.pth"
-    # Save only the state_dict for portability; optimizer not needed for inference.
-    torch.save(model.state_dict(), save_path)
-
-    print("Saved model to:", save_path)
+    # Already saved on every epoch; final path kept for clarity.
+    print("Training complete. Latest weights kept at:", save_path)
