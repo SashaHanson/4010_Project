@@ -146,9 +146,10 @@ def train_tcnn():
     # ---------------------------
     # Training loop
     # ---------------------------
-    EPOCHS = 2  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
+    EPOCHS = 10  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
     save_path = "/data/tcnn_weather_model.pth"  # overwritten each epoch; latest weights for eval
     checkpoint_path = "/data/tcnn_resume.pth"    # holds model + optimizer for resume
+    loss_history_path = "/data/tcnn_epoch_losses.npy"
 
     # If a checkpoint exists, resume from it.
     start_epoch = 0
@@ -158,6 +159,12 @@ def train_tcnn():
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         start_epoch = ckpt.get("epoch", 0)
         print(f"Resuming from epoch {start_epoch}")
+    epoch_losses = []
+    if os.path.exists(loss_history_path):
+        try:
+            epoch_losses = np.load(loss_history_path).tolist()
+        except Exception as e:
+            print("Warning: could not load previous loss history:", e)
 
     for epoch in range(start_epoch, EPOCHS):
         model.train()
@@ -172,7 +179,9 @@ def train_tcnn():
             optimizer.step()
             total_loss += loss.item()
 
-        print(f"Epoch {epoch + 1}/{EPOCHS}  Loss: {total_loss:.4f}")
+        avg_loss = total_loss / max(len(loader), 1)
+        epoch_losses.append(avg_loss)
+        print(f"Epoch {epoch + 1}/{EPOCHS}  Avg Loss: {avg_loss:.4f}")
 
         # Persist a resume checkpoint and the latest weights each epoch.
         torch.save(
@@ -184,8 +193,10 @@ def train_tcnn():
             checkpoint_path,
         )
         torch.save(model.state_dict(), save_path)
+        np.save(loss_history_path, np.array(epoch_losses))
         print("Saved checkpoint:", checkpoint_path)
         print("Saved weights:", save_path)
+        print("Saved loss history:", loss_history_path)
 
     # ---------------------------
     # Save model to the volume

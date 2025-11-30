@@ -205,5 +205,48 @@ def evaluate_tcnn():
     plt.savefig(f"{plot_dir}/mae_over_horizon.png")
     plt.close()
 
+    # 5. Training loss per epoch (if available from training run)
+    loss_history_path = "/data/tcnn_epoch_losses.npy"
+    if os.path.exists(loss_history_path):
+        try:
+            epoch_losses = np.load(loss_history_path)
+            plt.figure(figsize=(6, 4))
+            plt.plot(range(1, len(epoch_losses) + 1), epoch_losses, marker="o")
+            plt.title("Training Loss per Epoch")
+            plt.xlabel("Epoch")
+            plt.ylabel("Loss")
+            plt.grid(True, linestyle="--", alpha=0.4)
+            plt.tight_layout()
+            plt.savefig(f"{plot_dir}/loss_per_epoch.png")
+            plt.close()
+            print("Saved loss curve:", f"{plot_dir}/loss_per_epoch.png")
+        except Exception as e:
+            print("Could not load loss history:", e)
+    else:
+        print("Loss history file not found; skipping loss plot.")
+
+    # 6. Actual vs predicted curves for all targets on one sample
+    sample_idx = 0
+    if len(preds) > sample_idx:
+        steps = np.arange(pred_len)
+        fig, axes = plt.subplots(3, 2, figsize=(10, 8))
+        axes = axes.flatten()
+        for f in range(output_dim):
+            ax = axes[f]
+            ax.plot(steps, Y[sample_idx, :, f], label="Actual", linewidth=2)
+            ax.plot(steps, preds[sample_idx, :, f], label="Predicted", linewidth=2, linestyle="--")
+            ax.set_title(features[f])
+            ax.set_xlabel("Forecast Step")
+            ax.set_ylabel("Value")
+            ax.grid(True, linestyle="--", alpha=0.3)
+        axes[0].legend()
+        plt.tight_layout()
+        curves_path = f"{plot_dir}/actual_vs_pred_sample{sample_idx}.png"
+        plt.savefig(curves_path)
+        plt.close()
+        print("Saved target curves plot:", curves_path)
+    else:
+        print("Not enough samples to plot actual vs predicted curves.")
+
     print("\nSaved plot files in:", plot_dir)
     print("Evaluation and graphing completed.")
