@@ -10,6 +10,7 @@ image = (
         "scikit-learn",
         "matplotlib",
         "pandas",
+        "tqdm",
     )
 )
 
@@ -29,6 +30,7 @@ def evaluate_tcnn():
     import os
     import matplotlib.pyplot as plt
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    from tqdm import tqdm
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print("Using device:", device)
@@ -127,7 +129,7 @@ def evaluate_tcnn():
     preds_list = []
 
     with torch.no_grad():
-        for i in range(0, len(X_t), batch_size):
+        for i in tqdm(range(0, len(X_t), batch_size), desc="Inference batches", leave=False):
             batch = X_t[i:i + batch_size]
             out = model(batch)
             preds_list.append(out.cpu().numpy())
@@ -156,7 +158,7 @@ def evaluate_tcnn():
     features = [f"Feature {i}" for i in range(output_dim)]
 
     # 1. Predicted vs True (last timestep)
-    for f in range(output_dim):
+    for f in tqdm(range(output_dim), desc="Scatter plots", leave=False):
         plt.figure(figsize=(6, 4))
         plt.scatter(true_last[:, f], pred_last[:, f], s=2, alpha=0.5)
         plt.xlabel("True")
@@ -177,7 +179,7 @@ def evaluate_tcnn():
 
     # 3. R2 per feature
     r2_features = []
-    for f in range(output_dim):
+    for f in tqdm(range(output_dim), desc="R2 per feature", leave=False):
         r2_f = r2_score(true_last[:, f], pred_last[:, f])
         r2_features.append(r2_f)
 
@@ -192,7 +194,7 @@ def evaluate_tcnn():
 
     # 4. MAE across forecast horizon
     horizon_mae = []
-    for t in range(pred_len):
+    for t in tqdm(range(pred_len), desc="MAE horizon", leave=False):
         horizon_mae.append(mean_absolute_error(Y[:, t, :], preds[:, t, :]))
 
     plt.figure(figsize=(8, 4))
