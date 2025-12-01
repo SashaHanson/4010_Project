@@ -4,6 +4,13 @@ import shutil
 
 app = modal.App("lstm-eval")
 
+#This Modal app loads the preprocessed weather windows (X, Y) and a trained
+#LSTM model from the shared Modal volume. It runs the model in evaluation
+#mode over the full dataset, computes regression metrics, and writes plots
+#that show how well the network forecasts the next 168 hours. This was done so that I can
+#eveluate how my model is doing so that I know whether I am ready to submit it and compare 
+#it to the other models
+
 image = (
     modal.Image.debian_slim()
     .pip_install(
@@ -16,15 +23,17 @@ image = (
     )
 )
 
+#this is where the app is going to save its information
 volume = modal.Volume.from_name("dataset")
 
-
+#for this app we are going to use an A100 GPU and run for at most 30 minutes
 @app.function(
     image=image,
     gpu="A100",
     timeout=60 * 30,
     volumes={"/data": volume},
 )
+#these are the important imports that are needed to run this code
 def evaluate_lstm():
     import os
     import numpy as np
@@ -37,12 +46,14 @@ def evaluate_lstm():
     print("Files available in /data:", os.listdir("/data"))
 
     # --------- Clean existing plot directory ----------
+    #this is very important as I don't want my old plots to be there when I run the app again
     plot_dir = "/data/plots_lstm_advanced"
     if os.path.exists(plot_dir):
         shutil.rmtree(plot_dir)
     os.makedirs(plot_dir, exist_ok=True)
 
     # --------- Load data ----------
+    #this is where we load the data from the modal volume
     X = np.load("/data/X.npy")
     Y = np.load("/data/Y.npy")
 
@@ -51,6 +62,10 @@ def evaluate_lstm():
 
     X_t = torch.tensor(X, dtype=torch.float32, device=device)
 
+    # Recover the same dimensional information used during training:
+    # - input_dim: number of input features per hour in X
+    # - output_dim: number of target features per hour in Y
+    # - pred_len: how many hours into the future we forecast (168‑step horizon)
     input_dim = X.shape[2]
     output_dim = Y.shape[2]
     pred_len = Y.shape[1]
@@ -58,6 +73,10 @@ def evaluate_lstm():
     # ======================================
     # MODEL DEFINITIONS – EXACT COPY OF TRAIN
     # ======================================
+    # Same encoder–decoder with attention as in train_lstm:
+    # - Encoder: encodes the past window into hidden states for each timestep.
+    # - Attention: scores how relevant each past timestep is for the current prediction.
+    # - Decoder: generates the 168‑step forecast one hour at a time.
     class Encoder(nn.Module):
         def __init__(self, input_dim, hidden_dim=256, layers=2, dropout=0.3):
             super().__init__()
@@ -70,6 +89,8 @@ def evaluate_lstm():
             )
 
         def forward(self, x):
+            # x: [batch, input_len, input_dim]
+            # returns all timestep hidden states plus the final (h, c)
             outputs, (h, c) = self.lstm(x)
             return outputs, (h, c)
 
@@ -80,6 +101,9 @@ def evaluate_lstm():
             self.v = nn.Linear(hidden_dim, 1, bias=False)
 
         def forward(self, hidden, encoder_outputs):
+            # hidden: last decoder hidden state (query)
+            # encoder_outputs: all encoder states over time (keys/values)
+            # returns attention weights over timesteps [batch, src_len]
             seq_len = encoder_outputs.size(1)
             hidden_exp = hidden.unsqueeze(1).repeat(1, seq_len, 1)
             energy = torch.tanh(self.attn(torch.cat((hidden_exp, encoder_outputs), dim=2)))
@@ -100,6 +124,9 @@ def evaluate_lstm():
             self.fc_out = nn.Linear(hidden_dim, output_dim)
 
         def forward(self, y_prev, hidden, cell, encoder_outputs):
+            # One decoding step: use attention to build a context vector over
+            # all encoder states, then feed [y_prev, context] through the LSTM
+            # to produce the next hour's prediction.
             attn_weights = self.attention(hidden[-1], encoder_outputs)
             context = torch.bmm(attn_weights.unsqueeze(1), encoder_outputs).squeeze(1)
 
@@ -117,6 +144,9 @@ def evaluate_lstm():
             self.output_dim = output_dim
 
         def forward(self, x, y=None, teacher_forcing_ratio=0.5):
+            # Full seq2seq forward pass. During evaluation we call this with
+            # y=None and teacher_forcing_ratio=0 so the decoder always feeds
+            # back its own predictions (pure autoregressive forecasting).
             encoder_outputs, (h, c) = self.encoder(x)
             batch = x.size(0)
             outputs = torch.zeros(batch, self.pred_len, self.output_dim, device=x.device)
@@ -135,6 +165,7 @@ def evaluate_lstm():
             return outputs
 
     # --------- Load checkpoint and extract config ----------
+    #this is where we load the weights from the completed training
     checkpoint_path = "/data/lstm_weather_model_advanced.pth"
     
     if not os.path.exists(checkpoint_path):
@@ -167,12 +198,16 @@ def evaluate_lstm():
         config = {}
         print("✓ Loaded checkpoint (old format - using default config)")
     
-    # Extract hyperparameters from config or use defaults
+    #Extract hyperparameters from config or use defaults,
+    #this is important so that we can instantiate the model with the same 
+    #architecture as the trained model
     hidden_dim = config.get("hidden_dim", 256)
     num_layers = config.get("num_layers", 2)
     dropout = config.get("dropout", 0.3)
     
     # --------- Instantiate model with matching architecture ----------
+    #again we want to instantiate the model with the same architecture as the trained model, since 
+    #without this we will get errors or not very accurate testing results
     encoder = Encoder(input_dim, hidden_dim=hidden_dim, layers=num_layers, dropout=dropout)
     decoder = Decoder(output_dim, hidden_dim=hidden_dim, layers=num_layers, dropout=dropout)
     model = Seq2Seq(encoder, decoder, output_dim, pred_len).to(device)
@@ -209,6 +244,10 @@ def evaluate_lstm():
     # ------------------------------------
     # METRICS (using entire dataset)
     # ------------------------------------
+    #For the scalar summary metrics we only look at the very last forecast step
+    #of each sequence: true_last are the ground‑truth values at horizon 168,
+    #pred_last are the model’s predictions at that same final hour. The MAE/MSE/RMSE
+    #and R² we compute next all compare these two arrays.
     true_last = Y[:, -1, :]
     pred_last = preds[:, -1, :]
 
@@ -286,7 +325,7 @@ def evaluate_lstm():
     plt.close()
 
     # ------------ 5. Actual vs Predicted Series for each target ------------
-    sample_idx = 300  # choose a random sample
+    sample_idx = 300  #choose a random sample
     true_series = Y[sample_idx]
     pred_series = preds[sample_idx]
 
