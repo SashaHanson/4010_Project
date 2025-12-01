@@ -12,6 +12,7 @@ image = (
         "scikit-learn",
         "matplotlib",
         "pandas",
+        "tqdm",
     )
 )
 
@@ -31,6 +32,7 @@ def evaluate_lstm():
     import torch.nn as nn
     import matplotlib.pyplot as plt
     from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+    from tqdm import tqdm
 
     print("Files available in /data:", os.listdir("/data"))
 
@@ -64,7 +66,7 @@ def evaluate_lstm():
                 hidden_dim,
                 num_layers=layers,
                 batch_first=True,
-                dropout=dropout,
+                dropout=dropout if layers > 1 else 0,
             )
 
         def forward(self, x):
@@ -93,7 +95,7 @@ def evaluate_lstm():
                 hidden_dim,
                 num_layers=layers,
                 batch_first=True,
-                dropout=dropout,
+                dropout=dropout if layers > 1 else 0,
             )
             self.fc_out = nn.Linear(hidden_dim, output_dim)
 
@@ -132,13 +134,51 @@ def evaluate_lstm():
 
             return outputs
 
-    # --------- Instantiate + load weights ----------
-    encoder = Encoder(input_dim)
-    decoder = Decoder(output_dim)
+    # --------- Load checkpoint and extract config ----------
+    checkpoint_path = "/data/lstm_weather_model_advanced.pth"
+    
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found at {checkpoint_path}. "
+            "Please run train_lstm.py first to train and save the model."
+        )
+    
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+    except Exception as e:
+        raise RuntimeError(f"Error loading checkpoint: {e}")
+    
+    # Handle both old format (just state_dict) and new format (full checkpoint dict)
+    if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+        # New format: full checkpoint
+        model_state = checkpoint["model_state_dict"]
+        config = checkpoint.get("config", {})
+        best_epoch = checkpoint.get("epoch", "unknown")
+        best_val_loss = checkpoint.get("best_val_loss", "unknown")
+        print(f"✓ Loaded checkpoint from epoch {best_epoch} with val loss: {best_val_loss:.6f}")
+        if config:
+            print(f"  Model config: hidden_dim={config.get('hidden_dim', 256)}, "
+                  f"layers={config.get('num_layers', 2)}, dropout={config.get('dropout', 0.3)}")
+    else:
+        # Old format: just state_dict
+        model_state = checkpoint
+        config = {}
+        print("✓ Loaded checkpoint (old format - using default config)")
+    
+    # Extract hyperparameters from config or use defaults
+    hidden_dim = config.get("hidden_dim", 256)
+    num_layers = config.get("num_layers", 2)
+    dropout = config.get("dropout", 0.3)
+    
+    # --------- Instantiate model with matching architecture ----------
+    encoder = Encoder(input_dim, hidden_dim=hidden_dim, layers=num_layers, dropout=dropout)
+    decoder = Decoder(output_dim, hidden_dim=hidden_dim, layers=num_layers, dropout=dropout)
     model = Seq2Seq(encoder, decoder, output_dim, pred_len).to(device)
-
-    state = torch.load("/data/lstm_weather_model_advanced.pth", map_location=device)
-    model.load_state_dict(state)
+    
+    # Load weights
+    model.load_state_dict(model_state)
     model.eval()
 
     print("Model loaded successfully.")
@@ -148,14 +188,23 @@ def evaluate_lstm():
     # ======================================
     batch_size = 512
     preds_list = []
+    use_amp = config.get("use_amp", True) and device == "cuda"
 
+    print(f"Running inference with batch_size={batch_size}, use_amp={use_amp}...")
     with torch.no_grad():
-        for i in range(0, len(X_t), batch_size):
+        for i in tqdm(range(0, len(X_t), batch_size), desc="Inference"):
             batch = X_t[i : i + batch_size]
-            out = model(batch, y=None, teacher_forcing_ratio=0.0)
+            
+            if use_amp:
+                with torch.cuda.amp.autocast():
+                    out = model(batch, y=None, teacher_forcing_ratio=0.0)
+            else:
+                out = model(batch, y=None, teacher_forcing_ratio=0.0)
+            
             preds_list.append(out.cpu().numpy())
 
     preds = np.concatenate(preds_list, axis=0)
+    print(f"Inference complete. Predictions shape: {preds.shape}")
 
     # ------------------------------------
     # METRICS (using entire dataset)
