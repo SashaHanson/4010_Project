@@ -145,7 +145,7 @@ def train_tcnn():
     # ---------------------------
     # Training loop
     # ---------------------------
-    EPOCHS = 40  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
+    EPOCHS = 50  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
     save_path = "/data/tcnn_weather_model.pth"  # overwritten each epoch; latest weights for eval
     checkpoint_path = "/data/tcnn_resume.pth"    # holds model + optimizer for resume
     loss_history_path = "/data/tcnn_epoch_losses.npy"
