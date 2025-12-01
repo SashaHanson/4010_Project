@@ -1,1 +1,1 @@
-# write more in depth about modal and the structure of it, how everything will be stored in the modal volume
+This is the readme, its important to update this later
