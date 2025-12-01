@@ -251,4 +251,3 @@ def main():
     print("Starting FEDformer training...")
     train_transformer.remote()
     print("Training completed!")
-

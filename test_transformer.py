@@ -319,4 +319,3 @@ def main():
     print("Starting FEDformer evaluation...")
     test_transformer.remote()
     print("Evaluation completed!")
-

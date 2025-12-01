@@ -31,6 +31,7 @@ def compare_models():
     input_dim = X.shape[2]      # 16
     output_dim = Y.shape[2]     # 6
     pred_len = Y.shape[1]       # 168
+    seq_len = X.shape[1]        # 240
 
     X_t = torch.tensor(X, dtype=torch.float32).cuda()
 
@@ -120,7 +121,7 @@ def compare_models():
     tcnn.eval()
 
     # -------------------------
-    # FEDFORMER (Proper Implementation)
+    # IMPROVED FEDFORMER ARCHITECTURE
     # -------------------------
     class PositionalEncoding(nn.Module):
         def __init__(self, d_model, max_len=5000):
@@ -132,11 +133,11 @@ def compare_models():
             pe[:, 1::2] = torch.cos(position * div_term)
             pe = pe.unsqueeze(0)
             self.register_buffer('pe', pe)
-        def forward(self, x):
-            return x + self.pe[:, :x.size(1), :]
+        def forward(self, x, start_idx=0):
+            return x + self.pe[:, start_idx:start_idx + x.size(1), :]
 
     class FourierBlock(nn.Module):
-        def __init__(self, d_model, modes=32, dropout=0.1):
+        def __init__(self, d_model, modes=64, dropout=0.1):
             super().__init__()
             self.modes = modes
             scale = 1 / (d_model * modes)
@@ -160,79 +161,296 @@ def compare_models():
             return x
 
     class FEDformerEncoder(nn.Module):
-        def __init__(self, d_model, n_layers=3, modes=32, dropout=0.1):
+        def __init__(self, d_model, n_layers=4, modes=64, dropout=0.1):
             super().__init__()
             self.layers = nn.ModuleList([
                 FourierBlock(d_model, modes, dropout) for _ in range(n_layers)
             ])
+            self.norm = nn.LayerNorm(d_model)
         def forward(self, x):
             for layer in self.layers:
                 x = layer(x)
-            return x
+            return self.norm(x)
 
     class FEDformerDecoder(nn.Module):
-        def __init__(self, d_model, pred_len, modes=32, dropout=0.1):
+        def __init__(self, d_model, pred_len, modes=64, dropout=0.1):
             super().__init__()
             self.pred_len = pred_len
             self.modes = modes
             self.dropout = nn.Dropout(dropout)
-            self.norm = nn.LayerNorm(d_model)
-            self.cross_attention = nn.MultiheadAttention(
-                d_model, num_heads=8, dropout=dropout, batch_first=True
+            self.norm1 = nn.LayerNorm(d_model)
+            self.norm2 = nn.LayerNorm(d_model)
+            self.norm3 = nn.LayerNorm(d_model)
+            
+            # Self-attention in decoder
+            self.self_attention = nn.MultiheadAttention(
+                d_model, num_heads=16, dropout=dropout, batch_first=True
             )
+            
+            # Cross-attention for encoder-decoder interaction
+            self.cross_attention = nn.MultiheadAttention(
+                d_model, num_heads=16, dropout=dropout, batch_first=True
+            )
+            
+            # Feed-forward network
+            self.ff = nn.Sequential(
+                nn.Linear(d_model, d_model * 4),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model * 4, d_model)
+            )
+            
+            # Fourier block for decoder
             self.fourier_block = FourierBlock(d_model, modes, dropout)
         def forward(self, decoder_input, encoder_output):
-            attn_out, _ = self.cross_attention(
+            # Self-attention
+            residual = decoder_input
+            self_attn_out, _ = self.self_attention(
+                decoder_input, decoder_input, decoder_input
+            )
+            decoder_input = self.norm1(decoder_input + self_attn_out)
+            
+            # Cross-attention: decoder queries attend to encoder keys/values
+            residual = decoder_input
+            cross_attn_out, _ = self.cross_attention(
                 decoder_input, encoder_output, encoder_output
             )
-            decoder_input = decoder_input + attn_out
+            decoder_input = self.norm2(decoder_input + cross_attn_out)
+            
+            # Feed-forward
+            residual = decoder_input
+            ff_out = self.ff(decoder_input)
+            decoder_input = self.norm3(decoder_input + ff_out)
+            
+            # Apply Fourier block
             x = self.fourier_block(decoder_input)
             return x
 
     class FEDformer(nn.Module):
-        def __init__(self, input_dim, output_dim, pred_len, 
-                     d_model=256, n_encoder_layers=3, n_decoder_layers=2, 
-                     modes=32, dropout=0.1):
+        def __init__(self, input_dim, output_dim, pred_len, seq_len,
+                     d_model=512, n_encoder_layers=4, n_decoder_layers=3, 
+                     modes=64, dropout=0.1):
             super().__init__()
             self.pred_len = pred_len
             self.d_model = d_model
+
+            # Input embedding
             self.embed = nn.Linear(input_dim, d_model)
-            self.pos_encoder = PositionalEncoding(d_model)
+            self.pos_encoder = PositionalEncoding(d_model, max_len=seq_len + pred_len)
+            
+            # Encoder
             self.encoder = FEDformerEncoder(d_model, n_encoder_layers, modes, dropout)
+            
+            # Learned decoder query initialization
+            self.decoder_query_proj = nn.Linear(d_model, d_model)
+            
+            # Decoder
             self.decoder_layers = nn.ModuleList([
                 FEDformerDecoder(d_model, pred_len, modes, dropout) 
                 for _ in range(n_decoder_layers)
             ])
-            self.output_projection = nn.Sequential(
-                nn.Linear(d_model, d_model * 2),
-                nn.GELU(),
-                nn.Dropout(dropout),
-                nn.Linear(d_model * 2, output_dim)
-            )
+            
+            # Improved output projection: 3-layer MLP with residual
+            self.output_proj1 = nn.Linear(d_model, d_model * 2)
+            self.output_proj2 = nn.Linear(d_model * 2, d_model)
+            self.output_proj3 = nn.Linear(d_model, output_dim)
+            self.output_norm = nn.LayerNorm(d_model)
+            self.output_activation = nn.GELU()
+            self.output_dropout = nn.Dropout(dropout)
+
         def forward(self, x):
+            # x: [batch, seq_len, input_dim]
             batch_size = x.shape[0]
-            x = self.embed(x)
+            
+            # Encode input sequence
+            x = self.embed(x)  # [batch, seq_len, d_model]
             x = self.pos_encoder(x)
-            encoder_output = self.encoder(x)
-            last_hidden = encoder_output[:, -1:, :]
-            decoder_pos = self.pos_encoder.pe[:, :self.pred_len, :]
-            decoder_input = last_hidden.repeat(1, self.pred_len, 1) + decoder_pos
+            encoder_output = self.encoder(x)  # [batch, seq_len, d_model]
+            
+            # Improved decoder initialization: learned projection from encoder output
+            last_hidden = encoder_output[:, -1:, :]  # [batch, 1, d_model]
+            decoder_base = self.decoder_query_proj(last_hidden)  # [batch, 1, d_model]
+            
+            # Create decoder queries with positional encoding for future timesteps
+            decoder_pos = self.pos_encoder.pe[:, seq_len:seq_len + self.pred_len, :]
+            decoder_input = decoder_base.repeat(1, self.pred_len, 1) + decoder_pos
+            
+            # Decode to generate future sequence
             for decoder_layer in self.decoder_layers:
                 decoder_input = decoder_layer(decoder_input, encoder_output)
-            output = self.output_projection(decoder_input)
-            return output
+            
+            # Improved output projection with residual connection
+            residual = decoder_input
+            out = self.output_proj1(decoder_input)
+            out = self.output_activation(out)
+            out = self.output_dropout(out)
+            out = self.output_proj2(out)
+            out = self.output_norm(out + residual)  # Residual connection
+            out = self.output_proj3(out)
+            
+            return out
 
-    fed = FEDformer(
-        input_dim=input_dim,
-        output_dim=output_dim,
-        pred_len=pred_len,
-        d_model=256,
-        n_encoder_layers=3,
-        n_decoder_layers=2,
-        modes=32,
-        dropout=0.1
-    ).cuda()
-    fed.load_state_dict(torch.load("/data/fedformer_weather_model.pth"))
+    # Try to load checkpoint and detect architecture
+    checkpoint = torch.load("/data/fedformer_weather_model.pth", map_location='cuda')
+    
+    # Check if it's a new checkpoint with config
+    if isinstance(checkpoint, dict) and 'model_config' in checkpoint:
+        config = checkpoint['model_config']
+        fed = FEDformer(
+            input_dim=config['input_dim'],
+            output_dim=config['output_dim'],
+            pred_len=config['pred_len'],
+            seq_len=config['seq_len'],
+            d_model=config['d_model'],
+            n_encoder_layers=config['n_encoder_layers'],
+            n_decoder_layers=config['n_decoder_layers'],
+            modes=config['modes'],
+            dropout=config['dropout']
+        ).cuda()
+        fed.load_state_dict(checkpoint['model_state_dict'])
+        print(f"Loaded improved FEDformer (d_model={config['d_model']}, encoder_layers={config['n_encoder_layers']}, decoder_layers={config['n_decoder_layers']})")
+    else:
+        # Try to detect architecture from checkpoint
+        state_dict = checkpoint['model_state_dict'] if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint else checkpoint
+        
+        # Detect architecture by checking embed weight shape and key presence
+        d_model = state_dict.get('embed.weight', torch.zeros(1, 1)).shape[0]
+        has_new_keys = any('decoder_query_proj' in k or 'output_proj1' in k for k in state_dict.keys())
+        is_new_arch = (d_model == 512) and has_new_keys
+        
+        if is_new_arch:
+            # New improved architecture
+            fed = FEDformer(
+                input_dim=input_dim,
+                output_dim=output_dim,
+                pred_len=pred_len,
+                seq_len=seq_len,
+                d_model=512,
+                n_encoder_layers=4,
+                n_decoder_layers=3,
+                modes=64,
+                dropout=0.1
+            ).cuda()
+            fed.load_state_dict(state_dict)
+            print("Loaded improved FEDformer architecture")
+        else:
+            # Old architecture - need to use old model definition
+            print("Detected old FEDformer architecture, using compatible model definition...")
+            
+            class PositionalEncodingOld(nn.Module):
+                def __init__(self, d_model, max_len=5000):
+                    super().__init__()
+                    pe = torch.zeros(max_len, d_model)
+                    position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+                    div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+                    pe[:, 0::2] = torch.sin(position * div_term)
+                    pe[:, 1::2] = torch.cos(position * div_term)
+                    pe = pe.unsqueeze(0)
+                    self.register_buffer('pe', pe)
+                def forward(self, x):
+                    return x + self.pe[:, :x.size(1), :]
+
+            class FourierBlockOld(nn.Module):
+                def __init__(self, d_model, modes=32, dropout=0.1):
+                    super().__init__()
+                    self.modes = modes
+                    scale = 1 / (d_model * modes)
+                    self.weights_real = nn.Parameter(scale * torch.randn(modes, d_model))
+                    self.weights_imag = nn.Parameter(scale * torch.randn(modes, d_model))
+                    self.dropout = nn.Dropout(dropout)
+                    self.norm = nn.LayerNorm(d_model)
+                def forward(self, x):
+                    B, L, C = x.shape
+                    residual = x
+                    xf = fft.rfft(x, dim=1)
+                    kept = xf[:, :self.modes, :]
+                    real = kept.real * self.weights_real - kept.imag * self.weights_imag
+                    imag = kept.real * self.weights_imag + kept.imag * self.weights_real
+                    mixed = real + 1j * imag
+                    out = torch.zeros_like(xf)
+                    out[:, :self.modes, :] = mixed
+                    x = fft.irfft(out, n=L, dim=1)
+                    x = self.norm(x + residual)
+                    x = self.dropout(x)
+                    return x
+
+            class FEDformerEncoderOld(nn.Module):
+                def __init__(self, d_model, n_layers=3, modes=32, dropout=0.1):
+                    super().__init__()
+                    self.layers = nn.ModuleList([
+                        FourierBlockOld(d_model, modes, dropout) for _ in range(n_layers)
+                    ])
+                def forward(self, x):
+                    for layer in self.layers:
+                        x = layer(x)
+                    return x
+
+            class FEDformerDecoderOld(nn.Module):
+                def __init__(self, d_model, pred_len, modes=32, dropout=0.1):
+                    super().__init__()
+                    self.pred_len = pred_len
+                    self.modes = modes
+                    self.dropout = nn.Dropout(dropout)
+                    self.norm = nn.LayerNorm(d_model)
+                    self.cross_attention = nn.MultiheadAttention(
+                        d_model, num_heads=8, dropout=dropout, batch_first=True
+                    )
+                    self.fourier_block = FourierBlockOld(d_model, modes, dropout)
+                def forward(self, decoder_input, encoder_output):
+                    attn_out, _ = self.cross_attention(
+                        decoder_input, encoder_output, encoder_output
+                    )
+                    decoder_input = decoder_input + attn_out
+                    x = self.fourier_block(decoder_input)
+                    return x
+
+            class FEDformerOld(nn.Module):
+                def __init__(self, input_dim, output_dim, pred_len, 
+                             d_model=256, n_encoder_layers=3, n_decoder_layers=2, 
+                             modes=32, dropout=0.1):
+                    super().__init__()
+                    self.pred_len = pred_len
+                    self.d_model = d_model
+                    self.embed = nn.Linear(input_dim, d_model)
+                    self.pos_encoder = PositionalEncodingOld(d_model)
+                    self.encoder = FEDformerEncoderOld(d_model, n_encoder_layers, modes, dropout)
+                    self.decoder_layers = nn.ModuleList([
+                        FEDformerDecoderOld(d_model, pred_len, modes, dropout) 
+                        for _ in range(n_decoder_layers)
+                    ])
+                    self.output_projection = nn.Sequential(
+                        nn.Linear(d_model, d_model * 2),
+                        nn.GELU(),
+                        nn.Dropout(dropout),
+                        nn.Linear(d_model * 2, output_dim)
+                    )
+                def forward(self, x):
+                    batch_size = x.shape[0]
+                    x = self.embed(x)
+                    x = self.pos_encoder(x)
+                    encoder_output = self.encoder(x)
+                    last_hidden = encoder_output[:, -1:, :]
+                    decoder_pos = self.pos_encoder.pe[:, :self.pred_len, :]
+                    decoder_input = last_hidden.repeat(1, self.pred_len, 1) + decoder_pos
+                    for decoder_layer in self.decoder_layers:
+                        decoder_input = decoder_layer(decoder_input, encoder_output)
+                    output = self.output_projection(decoder_input)
+                    return output
+
+            fed = FEDformerOld(
+                input_dim=input_dim,
+                output_dim=output_dim,
+                pred_len=pred_len,
+                d_model=256,
+                n_encoder_layers=3,
+                n_decoder_layers=2,
+                modes=32,
+                dropout=0.1
+            ).cuda()
+            fed.load_state_dict(state_dict)
+            print("Loaded old FEDformer architecture (d_model=256, encoder_layers=3, decoder_layers=2)")
+            print("NOTE: To use the improved architecture, please retrain the model with train_transformer.py")
+    
     fed.eval()
 
     # -------------------------
