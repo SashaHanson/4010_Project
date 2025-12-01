@@ -49,6 +49,15 @@ def evaluate_tcnn():
     input_dim = X.shape[2]
     output_dim = Y.shape[2]
     pred_len = Y.shape[1]
+    default_targets = [
+        "Temperature",
+        "Relative Humidity",
+        "Wind Speed",
+        "Wind Direction",
+        "Soil Temperature",
+        "Soil Moisture",
+    ]
+    target_names = default_targets if output_dim == len(default_targets) else [f"Target {i}" for i in range(output_dim)]
 
     # -------------------------
     # Model definitions
@@ -90,7 +99,7 @@ def evaluate_tcnn():
     class TCNN(nn.Module):
         def __init__(self):
             super().__init__()
-            channels = [input_dim, 64, 64, 64]
+            channels = [input_dim, 128, 128, 128, 128, 128, 128, 128]  # 7 blocks
             layers = []
             for i in range(len(channels) - 1):
                 layers.append(
@@ -98,7 +107,7 @@ def evaluate_tcnn():
                         channels[i],
                         channels[i + 1],
                         kernel_size=3,
-                        dilation=2 ** i,
+                        dilation=2 ** i,  # 1,2,4,8,16,32,64
                         dropout=0.1,
                     )
                 )
@@ -155,15 +164,13 @@ def evaluate_tcnn():
     # SAVE PLOTS
     # --------------------------------------------
 
-    features = [f"Feature {i}" for i in range(output_dim)]
-
     # 1. Predicted vs True (last timestep)
     for f in tqdm(range(output_dim), desc="Scatter plots", leave=False):
         plt.figure(figsize=(6, 4))
         plt.scatter(true_last[:, f], pred_last[:, f], s=2, alpha=0.5)
         plt.xlabel("True")
         plt.ylabel("Predicted")
-        plt.title(f"Last-step Prediction vs True - {features[f]}")
+        plt.title(f"Last-step Prediction vs True - {target_names[f]}")
         plt.savefig(f"{plot_dir}/scatter_feature_{f}.png")
         plt.close()
 
@@ -184,7 +191,7 @@ def evaluate_tcnn():
         r2_features.append(r2_f)
 
     plt.figure(figsize=(6, 4))
-    plt.bar(features, r2_features)
+    plt.bar(target_names, r2_features)
     plt.title("R2 Per Feature (Last Step)")
     plt.ylabel("R2")
     plt.xticks(rotation=45)
@@ -235,7 +242,7 @@ def evaluate_tcnn():
             ax = axes[f]
             ax.plot(steps, Y[sample_idx, :, f], label="Actual", linewidth=2)
             ax.plot(steps, preds[sample_idx, :, f], label="Predicted", linewidth=2, linestyle="--")
-            ax.set_title(features[f])
+            ax.set_title(target_names[f])
             ax.set_xlabel("Forecast Step")
             ax.set_ylabel("Value")
             ax.grid(True, linestyle="--", alpha=0.3)
