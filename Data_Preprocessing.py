@@ -14,7 +14,7 @@ volume = modal.Volume.from_name("dataset", create_if_missing=False)
 
 @app.function(
     image=image,
-    gpu="A100",             # Allocate an A100 GPU (overkill for preprocessing, but allowed)
+    gpu="A100",             # Allocate an A100 GPU on Modal
     timeout=600,            # Allow up to 10 minutes of execution time
     volumes={"/data": volume},  # Mount the dataset volume inside the container
 )
@@ -27,7 +27,7 @@ def run_preprocessing():
     # Display all files in the mounted dataset directory to confirm correct volume attachment
     print("Files in /data:", os.listdir("/data"))
 
-    # Read the weather data CSV using semicolon separators (common in EU datasets)
+    # Read the weather data CSV using semicolon separators )
     df = pd.read_csv("/data/weather.csv", sep=";")
 
     # Parse datetime strings into pandas datetime objects for easier feature extraction
@@ -47,8 +47,7 @@ def run_preprocessing():
     df["dayofweek"] = df["DateTime"].dt.dayofweek
     df["dayofyear"] = df["DateTime"].dt.dayofyear
 
-    # Encode cyclical time features using sine/cosine transformations
-    # (Important because time cycles repeat: e.g., hour 23 is close to hour 0)
+    # Encode cyclical time features using sine/cosine transformations. this is needed because time cycles repeat
     df["hour_sin"] = np.sin(2 * np.pi * df["hour"] / 24)
     df["hour_cos"] = np.cos(2 * np.pi * df["hour"] / 24)
     df["doy_sin"] = np.sin(2 * np.pi * df["dayofyear"] / 365)
@@ -73,7 +72,6 @@ def run_preprocessing():
     ]
 
     # Normalize input features to zero mean and unit variance
-    # This is essential for many ML models (especially neural networks)
     scaler = StandardScaler()
     scaled_data = pd.DataFrame(
         scaler.fit_transform(df[feature_cols]),
