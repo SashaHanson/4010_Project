@@ -1,9 +1,11 @@
 ﻿import modal
 
 app = modal.App("tcnn-eval")
+# Modal app used to spin up a GPU-backed evaluation job for the temporal CNN forecaster.
 
 image = (
     modal.Image.debian_slim()
+    # Pre-bake dependencies into the container image so evaluation jobs spin up quickly.
     .pip_install(
         "torch",
         "numpy",
@@ -15,6 +17,7 @@ image = (
 )
 
 volume = modal.Volume.from_name("dataset")
+# Shared Modal volume carrying the dataset tensors, saved weights, and generated plots.
 
 
 @app.function(
@@ -24,6 +27,7 @@ volume = modal.Volume.from_name("dataset")
     volumes={"/data": volume},
 )
 def evaluate_tcnn():
+    """Load the saved TCNN model, run batched inference, compute summary metrics, and save diagnostic plots."""
     import torch
     import torch.nn as nn
     import numpy as np
@@ -40,15 +44,16 @@ def evaluate_tcnn():
     plot_dir = "/data/plots_tcnn"
     os.makedirs(plot_dir, exist_ok=True)
 
-    # Load data
+    # Load precomputed sliding-window tensors from the Modal volume.
     X = np.load("/data/X.npy")
     Y = np.load("/data/Y.npy")
 
-    X_t = torch.tensor(X, dtype=torch.float32, device=device)
+    X_t = torch.tensor(X, dtype=torch.float32, device=device)  # Move inputs to the evaluation device.
 
     input_dim = X.shape[2]
     output_dim = Y.shape[2]
     pred_len = Y.shape[1]
+    # Friendly labels for plots when the dataset matches the expected weather feature ordering.
     default_targets = [
         "Temperature",
         "Relative Humidity",
@@ -65,6 +70,7 @@ def evaluate_tcnn():
     class TemporalConvBlock(nn.Module):
         def __init__(self, in_channels, out_channels, kernel_size=3, dilation=1, dropout=0.1):
             super().__init__()
+            # Causal padding prevents the convolution from peeking into future timesteps.
             padding = (kernel_size - 1) * dilation  # causal padding
             self.pad1 = nn.ConstantPad1d((padding, 0), 0)
             self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation)
@@ -76,6 +82,7 @@ def evaluate_tcnn():
             self.relu2 = nn.ReLU()
             self.dropout2 = nn.Dropout(dropout)
 
+            # Project to match dimensions when the residual path's channels differ.
             self.residual = (
                 nn.Conv1d(in_channels, out_channels, kernel_size=1)
                 if in_channels != out_channels
@@ -83,22 +90,26 @@ def evaluate_tcnn():
             )
 
         def forward(self, x):
+            # First dilated convolutional sub-block.
             out = self.pad1(x)
             out = self.conv1(out)
             out = self.relu1(out)
             out = self.dropout1(out)
 
+            # Second dilated convolutional sub-block.
             out = self.pad2(out)
             out = self.conv2(out)
             out = self.relu2(out)
             out = self.dropout2(out)
 
+            # Residual path keeps gradients stable as receptive field grows.
             res = x if self.residual is None else self.residual(x)
             return out + res
 
     class TCNN(nn.Module):
         def __init__(self):
             super().__init__()
+            # Channel configuration for the TCN stack: input features + 7 residual blocks.
             channels = [input_dim, 128, 128, 128, 128, 128, 128, 128]  # 7 blocks
             layers = []
             for i in range(len(channels) - 1):
@@ -107,16 +118,20 @@ def evaluate_tcnn():
                         channels[i],
                         channels[i + 1],
                         kernel_size=3,
+                        # Exponentially increasing dilation grows the receptive field without huge depth.
                         dilation=2 ** i,  # 1,2,4,8,16,32,64
                         dropout=0.1,
                     )
                 )
             self.tcn = nn.Sequential(*layers)
+            # Linear head maps final timestep features to the full forecast horizon.
             self.head = nn.Linear(channels[-1], pred_len * output_dim)
 
         def forward(self, x):
+            # Switch to channel-first format expected by 1D convolutions.
             x = x.transpose(1, 2)
             features = self.tcn(x)
+            # Only the most recent timestep's features are used to produce the forecast vector.
             last_step = features[:, :, -1]
             out = self.head(last_step)
             return out.view(-1, pred_len, output_dim)
@@ -134,10 +149,10 @@ def evaluate_tcnn():
     # -------------------------
     # Batched inference
     # -------------------------
-    batch_size = 512
+    batch_size = 512  # Large batches keep the GPU busy without exceeding memory.
     preds_list = []
 
-    with torch.no_grad():
+    with torch.no_grad():  # Disable autograd for faster evaluation.
         for i in tqdm(range(0, len(X_t), batch_size), desc="Inference batches", leave=False):
             batch = X_t[i:i + batch_size]
             out = model(batch)
@@ -145,7 +160,7 @@ def evaluate_tcnn():
 
     preds = np.concatenate(preds_list, axis=0)
 
-    # Last-step metrics
+    # Last-step metrics (headline stats on the most recent forecast step).
     true_last = Y[:, -1, :]
     pred_last = preds[:, -1, :]
 
@@ -200,7 +215,7 @@ def evaluate_tcnn():
     plt.close()
 
     # 4. MAE across forecast horizon
-    horizon_mae = []
+    horizon_mae = []  # Helps spot whether errors compound further into the forecast.
     for t in tqdm(range(pred_len), desc="MAE horizon", leave=False):
         horizon_mae.append(mean_absolute_error(Y[:, t, :], preds[:, t, :]))
 
