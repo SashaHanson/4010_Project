@@ -3,12 +3,14 @@ import modal
 # Simple Modal app that loads preprocessed weather windows,
 # trains a TCN on GPU, and writes the weights back to the same volume.
 # Assumes Data_Preprocessing has already produced X.npy and Y.npy in the volume.
+# This file is the training entrypoint Modal will execute.
 app = modal.App("tcnn-training")
 
 # Use an A100 GPU + PyTorch in the image
 # (Modal will place the container on GPU hardware when scheduled.)
 image = (
     modal.Image.debian_slim()
+    # Preinstall core deps to avoid pip work at job start.
     .pip_install("torch", "numpy", "tqdm")
 )
 
@@ -27,6 +29,7 @@ def train_tcnn():
     Load the sliding-window tensors from the shared volume, train a small
     Temporal Convolutional Network (TCN) to forecast the next 168 time steps
     from the previous 240, then persist the weights to the same volume.
+    Also saves checkpoints so long-running jobs can resume if preempted.
     """
     import torch
     import torch.nn as nn
@@ -57,6 +60,8 @@ def train_tcnn():
     # which improves generalization and optimizer stability.
     dataset = torch.utils.data.TensorDataset(X, Y)
     loader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+    # batch_size=32 keeps GPU memory usage comfortable on A100 while giving stable gradients.
+    # num_workers left default (0) to keep things simple inside Modal's container.
 
     #change for sasha
     # Capture dimensions directly from the data to keep the model flexible.
@@ -122,7 +127,7 @@ def train_tcnn():
                         channels[i],
                         channels[i + 1],
                         kernel_size=3,
-                        dilation=2 ** i,  # 1,2,4,8,16,32,64
+                        dilation=2 ** i,  # 1,2,4,8,16,32,64 grows receptive field exponentially
                         dropout=0.1,
                     )
                 )
@@ -140,17 +145,17 @@ def train_tcnn():
 
     model = TCNN().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
-    criterion = nn.MSELoss()
+    criterion = nn.MSELoss()  # train to minimize scale-independent squared error on all horizons/targets
 
     # ---------------------------
     # Training loop
     # ---------------------------
-    EPOCHS = 40  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
+    EPOCHS = 50  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
     save_path = "/data/tcnn_weather_model.pth"  # overwritten each epoch; latest weights for eval
     checkpoint_path = "/data/tcnn_resume.pth"    # holds model + optimizer for resume
     loss_history_path = "/data/tcnn_epoch_losses.npy"
 
-    # If a checkpoint exists, resume from it.
+    # If a checkpoint exists, resume from it so interrupted jobs continue training.
     start_epoch = 0
     if os.path.exists(checkpoint_path):
         ckpt = torch.load(checkpoint_path, map_location=device)
@@ -161,7 +166,7 @@ def train_tcnn():
     epoch_losses = []
     if os.path.exists(loss_history_path):
         try:
-            epoch_losses = np.load(loss_history_path).tolist()
+            epoch_losses = np.load(loss_history_path).tolist()  # keep prior curve for plotting continuity
         except Exception as e:
             print("Warning: could not load previous loss history:", e)
 
@@ -178,7 +183,7 @@ def train_tcnn():
             optimizer.step()
             total_loss += loss.item()
 
-        avg_loss = total_loss / max(len(loader), 1)
+        avg_loss = total_loss / max(len(loader), 1)  # epoch-level scalar for monitoring/early stopping
         epoch_losses.append(avg_loss)
         print(f"Epoch {epoch + 1}/{EPOCHS}  Avg Loss: {avg_loss:.4f}")
 
@@ -191,8 +196,8 @@ def train_tcnn():
             },
             checkpoint_path,
         )
-        torch.save(model.state_dict(), save_path)
-        np.save(loss_history_path, np.array(epoch_losses))
+        torch.save(model.state_dict(), save_path)  # lightweight file used by evaluation job
+        np.save(loss_history_path, np.array(epoch_losses))  # persisted so plots can be produced later
         print("Saved checkpoint:", checkpoint_path)
         print("Saved weights:", save_path)
         print("Saved loss history:", loss_history_path)
