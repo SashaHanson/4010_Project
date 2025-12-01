@@ -107,16 +107,14 @@ def train_tcnn():
 
     class TCNN(nn.Module):
         """
-        Stacks several TemporalConvBlocks with increasing dilation (1, 2, 4)
-        to enlarge the receptive field over the 240-step history, then uses the
-        last causal feature vector to predict all future steps at once.
-        Effective receptive field covers ~1 + 2 + 4 kernel spans (~21 steps)
-        per block, allowing the model to aggregate information from far back in
-        the 240-step context without deep stacks.
+        Stacks several TemporalConvBlocks with doubling dilation (1, 2, 4, ...)
+        to grow the causal receptive field over the 240-step history. Seven
+        blocks with kernel=3 and dilations up to 64 give a receptive field
+        wide enough (~255 steps) to cover the full window.
         """
         def __init__(self):
             super().__init__()
-            channels = [input_dim, 64, 64, 64]
+            channels = [input_dim, 128, 128, 128, 128, 128, 128, 128]  # 7 blocks
             layers = []
             for i in range(len(channels) - 1):
                 layers.append(
@@ -124,7 +122,7 @@ def train_tcnn():
                         channels[i],
                         channels[i + 1],
                         kernel_size=3,
-                        dilation=2 ** i,  # exponentially growing receptive field
+                        dilation=2 ** i,  # 1,2,4,8,16,32,64
                         dropout=0.1,
                     )
                 )
@@ -147,7 +145,7 @@ def train_tcnn():
     # ---------------------------
     # Training loop
     # ---------------------------
-    EPOCHS = 10  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
+    EPOCHS = 40  # Keep short for quick checks; increase once pipeline is validated. _-------------------------------------->>>>>>>>> CHeck AFTER PLS!!!
     save_path = "/data/tcnn_weather_model.pth"  # overwritten each epoch; latest weights for eval
     checkpoint_path = "/data/tcnn_resume.pth"    # holds model + optimizer for resume
     loss_history_path = "/data/tcnn_epoch_losses.npy"
