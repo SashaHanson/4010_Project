@@ -11,3 +11,6 @@ For evaluation, each team member developed their own testing script tailored to 
 Once the strongest architecture was identified which was the FED Former, the team created a custom hyperparameter optimization (HPO) script to fine-tune the best model further. This process explored variations in learning rate, batch size, dropout and weight decay. The final tuned weights of the model was saved back into the volume for final use.
 
 Finally, the compare_models.py plotting script was used to generate clean and comprehensive visualizations for the final optimized model in comparison to the three previous models.
+
+Below is the comparison for with and without HPO on the FEDformer. It is important to not these values are a result of HPO not being allowed to go deep enough as we were limited on compute
+![Alt text](assets/FEDformer_vs_hpo.png)
