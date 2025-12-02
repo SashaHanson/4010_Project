@@ -8,9 +8,9 @@ With the data prepared, three different neural network architectures were implem
 
 For evaluation, each team member developed their own testing script tailored to their model to allow them to eveluate their model independently. Every script saved its resulting performance metrics and plots back into the shared Modal volume. Testing scripts were named: test_lstm.py, test_tcnn.py and test_transformer.py. After all individual evaluations were completed, a unified benchmarking script (compare_models.py) was created to test all models side-by-side. It compared LSTM, TCNN, and Transformer architectures across several key metrics.
 
-Once the strongest architecture was identified which was the FEDformer, the team created a custom hyperparameter optimization (HPO) script to fine-tune the best model further. This process explored variations in learning rate, batch size, dropout and weight decay. The final tuned weights of the model was saved back into the volume for final use.
+Once the strongest architecture was identified which was the FEDformer, the team created a custom hyperparameter optimization (HPO) script (train_transformer_hpo.py) to fine-tune the best model further. This process explored variations in learning rate, batch size, dropout and weight decay. The final tuned weights of the model was saved back into the volume for final use.
 
 Finally, the compare_models.py plotting script was used to generate clean and comprehensive visualizations for the final optimized model in comparison to the three previous models.
 
-Below is the comparison for with and without HPO on the FEDformer. It is important to not these values are a result of HPO not being allowed to go deep enough as we were limited on compute
+Below is the comparison for with and without HPO on the FEDformer. It is important to not these values are a result of HPO not being allowed to go deep enough as we were limited on compute time and credits.
 ![Alt text](assets/model_comparison.png)
