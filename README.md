@@ -13,4 +13,4 @@ Once the strongest architecture was identified which was the FEDformer, the team
 Finally, the compare_models.py plotting script was used to generate clean and comprehensive visualizations for the final optimized model in comparison to the three previous models.
 
 Below is the comparison for with and without HPO on the FEDformer. It is important to not these values are a result of HPO not being allowed to go deep enough as we were limited on compute
-![Alt text](assets/FEDformer_vs_hpo.png)
+![Alt text](assets/model_comparison.png)
